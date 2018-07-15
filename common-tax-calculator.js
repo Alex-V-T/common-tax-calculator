@@ -1,11 +1,14 @@
 if (process.argv.length !== 4) {
-	const errorMessage = "Provide path to a source CSV as a single argument.";
+	const errorMessage = "Provide path to a usd and uah accounts bank statements.";
 	console.error(errorMessage)
 	throw new Error(errorMessage);
 }
 
 const usdCsvFileName = process.argv[2];
 const uahCsvFileName = process.argv[3];
+
+const USD = 'USD';
+const UAH = 'UAH';
 
 const parseNumber = stringValue => {
 	return Number(stringValue.replace(' ', ''));
@@ -39,13 +42,21 @@ const parseUsdCsv = inputFileName => {
 		const sum = parseNumber(csvAsArray[i][creditIndex]);
 		if (sum > 0) {
 			const date = parseDate(csvAsArray[i][dateIndex]);
-			result.push( {sum: sum, date: date} );
+			result.push( {sum: sum, date: date, currency: USD} );
 		}     
     }
     return result;
 }
 
 const parseUahCsv = inputFileName => {
+	
+	const parseFee = description => {
+		let fragment = "на сумму";
+		let indexOfFeeStart = description.indexOf("на суму");
+		let indexOfFeeEnd = description.indexOf("грн", indexOfFeeStart);
+		return parseNumber(description.slice(indexOfFeeStart + fragment.length, indexOfFeeEnd));
+	}
+
 	const dateIndex = 4;
 	const creditIndex = 14;
 	const descriptionIndex = 15;
@@ -58,72 +69,70 @@ const parseUahCsv = inputFileName => {
 		let description = csvAsArray[i][descriptionIndex];
 
 		if (sum > 0) {
-			const date = parseDate(csvAsArray[i][dateIndex]);
-			result.push({
-				sum: sum, 
-				date: date, 
-				description: description
-			});			
+			if (description.indexOf("від продажу валюти") >=0
+				&& description.indexOf("зг. заявки") === -1) {
+				const date = parseDate(csvAsArray[i][dateIndex]);
+				const feeAmount = parseFee(description);				
+
+				result.push( {sumUah: sum + feeAmount, date: date, currency: UAH} );
+			}	
 		}     
     }
     return result;
 }
 
-
-const sumByNbuRate = async usdSums => {
+const calculateUahByNbuRate = async usdSums => {
 	const axios = require('axios');
 
-	let total = 0;
+	let usdIncomeByNbuRate = [...usdSums];
 	
-	console.debug("date \t\t sum(usd) \t rate");
-	for (let i = 0; i < usdSums.length; i++) {
+	for (let i = 0; i < usdIncomeByNbuRate.length; i++) {
 		const formattedDate = formatDate(usdSums[i].date).replace(/-/g, '');		
 		const nbuRepsonce = await axios(
 			"https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange?json&valcode=USD&date="
 			+ formattedDate);
-		const rate = nbuRepsonce.data[0].rate;
-		
-		console.debug(`${formatDate(usdSums[i].date)}  \t ${usdSums[i].sum} \t ${rate} \t ${rate * usdSums[i].sum}`);
-		
-		total += rate * usdSums[i].sum;
+		const rate = nbuRepsonce.data[0].rate;		
+		usdIncomeByNbuRate[i].sumUah = rate * usdIncomeByNbuRate[i].sum;
+		usdIncomeByNbuRate[i].rate = rate;
 	}	
 	
-	return total;
+	return usdIncomeByNbuRate;
 }
 
-const sumMandatorySale = uahSums => {
+const sumUahTotal = (uahIncome, foreignCurrencyIncome) => {
+	const formatSum = (sum, width, fixed) => {
+		if (typeof sum !== 'number') {
+			return new String('-').padStart(width, ' ');
+		}
 
-	const parseFee = description => {
-		let fragment = "на сумму";
-		let indexOfFeeStart = description.indexOf("на суму");
-		let indexOfFeeEnd = description.indexOf("грн", indexOfFeeStart);
-		return parseNumber(description.slice(indexOfFeeStart + fragment.length, indexOfFeeEnd));
+		if (typeof fixed !== 'undefined') {
+			return new String(sum.toFixed(fixed)).padStart(width, ' ').substring(0, width);
+		}
+
+		return new String(sum).padStart(width, ' ').substring(0, width);
 	}
 
+	let allIncome = [...uahIncome, ...foreignCurrencyIncome];
+	allIncome.sort((a, b) => a.date - b.date);
 	let total = 0;
-	
-	console.debug("date \t sum(uah) \t\t description");
-	for (let i = 0; i < uahSums.length; i++) {
-		
-		if (uahSums[i].description.indexOf("від продажу валюти") >=0
-			&& uahSums[i].description.indexOf("зг. заявки") === -1) {
-			const feeAmount = parseFee(uahSums[i].description);				
-			console.debug(`${formatDate(uahSums[i].date)} \t ${uahSums[i].sum + feeAmount} \t ${uahSums[i].description}`);
-
-			total += uahSums[i].sum + feeAmount;
-		}				
+	console.log("date \t\t sum(uah) \t sum(usd) \t rate \t currency");
+	for (let i = 0; i < allIncome.length; i++) {
+		let {date, sumUah, sum, rate, currency} = allIncome[i];
+		total += sumUah;
+		console.log(`${formatDate(date)}  ${formatSum(sumUah, 14, 4)} ${formatSum(sum, 12, 2)} ${formatSum(rate, 14)} \t ${currency}`);
 	}	
 	
 	return total;
 }
 
-let uahSums = parseUahCsv(uahCsvFileName);
-let mandatorySellTotal = sumMandatorySale(uahSums);
+let uahIncome = parseUahCsv(uahCsvFileName);
 
 let usdSums = parseUsdCsv(usdCsvFileName);
-let totalUah = sumByNbuRate(usdSums);
+let usdIncomeByNbuRate = calculateUahByNbuRate(usdSums);
 
-totalUah.then(
-	result => { console.log('Total sum: ' + (result + mandatorySellTotal)) },
+usdIncomeByNbuRate.then(
+	foreignCurrencyIncome => { 
+		console.log(sumUahTotal(uahIncome, foreignCurrencyIncome));
+	},
     error  => { console.log(error) }
 )
